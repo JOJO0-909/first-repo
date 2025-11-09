@@ -80,6 +80,52 @@ class ATACseq无预处理优化:
         
         return self.参数组合
     
+    def 计算邻域保持度(self, 原始数据, 降维数据, k=15):
+        """
+        计算邻域保持度 - 评估降维前后邻域结构的一致性
+        返回邻域保持度得分 (0-1之间，越高表示邻域保持越好)
+        """
+        try:
+            # 确保使用稠密数组进行计算
+            if issparse(原始数据):
+                原始数据 = 原始数据.toarray()
+            if issparse(降维数据):
+                降维数据 = 降维数据.toarray()
+                
+            # 限制k值不超过样本数
+            k = min(k, 原始数据.shape[0] - 1)
+            
+            # 计算原始空间和降维空间的k近邻
+            nbrs_原始 = NearestNeighbors(n_neighbors=k+1).fit(原始数据)
+            nbrs_降维 = NearestNeighbors(n_neighbors=k+1).fit(降维数据)
+            
+            distances_原始, indices_原始 = nbrs_原始.kneighbors(原始数据)
+            distances_降维, indices_降维 = nbrs_降维.kneighbors(降维数据)
+            
+            总保持度 = 0
+            有效样本数 = 0
+            
+            for i in range(len(indices_原始)):
+                # 跳过自身，取前k个邻居
+                原始邻居集 = set(indices_原始[i][1:k+1])
+                降维邻居集 = set(indices_降维[i][1:k+1])
+                
+                # 计算Jaccard相似度
+                交集大小 = len(原始邻居集 & 降维邻居集)
+                并集大小 = len(原始邻居集 | 降维邻居集)
+                
+                if 并集大小 > 0:
+                    jaccard相似度 = 交集大小 / 并集大小
+                    总保持度 += jaccard相似度
+                    有效样本数 += 1
+            
+            平均邻域保持度 = 总保持度 / 有效样本数 if 有效样本数 > 0 else 0
+            return 平均邻域保持度
+            
+        except Exception as e:
+            print(f"  邻域保持度计算失败: {e}")
+            return 0.0
+    
     def 执行PHATE降维(self, n_components, knn, decay, t):
         """使用原始数据执行PHATE降维"""
         try:
@@ -193,6 +239,12 @@ class ATACseq无预处理优化:
             if 降维结果 is None:
                 return None
             
+            # 计算邻域保持度
+            print(f"  计算邻域保持度...")
+            邻域保持度_00 = self.计算邻域保持度(self.原始数据_00, 降维结果['phate_00'])
+            邻域保持度_01 = self.计算邻域保持度(self.原始数据_01, 降维结果['phate_01'])
+            平均邻域保持度 = (邻域保持度_00 + 邻域保持度_01) / 2
+            
             # 执行聚类
             聚类标签 = self.leiden聚类(降维结果['phate合并'])
             
@@ -226,6 +278,9 @@ class ATACseq无预处理优化:
                 'ARI': ari,
                 'NMI': nmi,
                 '轮廓系数': 轮廓系数,
+                '邻域保持度': 平均邻域保持度,
+                '邻域保持度_00': 邻域保持度_00,
+                '邻域保持度_01': 邻域保持度_01,
                 '聚类数量': len(np.unique(聚类标签)),
                 '耗时': 耗时,
                 '降维结果': 降维结果,
@@ -272,9 +327,9 @@ class ATACseq无预处理优化:
             if 结果 is not None:
                 结果列表.append(结果)
                 if 结果['ARI'] is not None:
-                    print(f"  ✓ 完成 - ARI: {结果['ARI']:.4f}, 聚类: {结果['聚类数量']}个")
+                    print(f"  ✓ 完成 - ARI: {结果['ARI']:.4f}, 邻域保持: {结果['邻域保持度']:.4f}, 聚类: {结果['聚类数量']}个")
                 else:
-                    print(f"  ✓ 完成 - 轮廓系数: {结果['轮廓系数']:.4f}, 聚类: {结果['聚类数量']}个")
+                    print(f"  ✓ 完成 - 轮廓系数: {结果['轮廓系数']:.4f}, 邻域保持: {结果['邻域保持度']:.4f}, 聚类: {结果['聚类数量']}个")
         
         # 找到最佳结果
         if 结果列表:
@@ -319,7 +374,12 @@ class ATACseq无预处理优化:
         print(f"  Decay: {最佳['decay']}")
         print(f"  t: {最佳['t']}")
         
-        print(f"\n📊 聚类效果:")
+        print(f"\n📊 降维效果:")
+        print(f"  邻域保持度: {最佳['邻域保持度']:.4f}")
+        print(f"  批次00邻域保持度: {最佳['邻域保持度_00']:.4f}")
+        print(f"  批次01邻域保持度: {最佳['邻域保持度_01']:.4f}")
+        
+        print(f"\n📈 聚类效果:")
         print(f"  聚类数量: {最佳['聚类数量']}")
         if 最佳['ARI'] is not None:
             print(f"  ARI: {最佳['ARI']:.4f}")
@@ -343,13 +403,15 @@ class ATACseq无预处理优化:
                 排序结果 = sorted(有效结果, key=lambda x: x['轮廓系数'], reverse=True)
                 排序依据 = "轮廓系数"
             
-            print(f"{'排名':<4} {'维度':<6} {'KNN':<4} {'Decay':<6} {'t':<8} {'ARI':<8} {'NMI':<8} {'轮廓系数':<10}")
-            print("-" * 70)
+            print(f"排序依据: {排序依据}")
+            print(f"{'排名':<4} {'维度':<6} {'KNN':<4} {'Decay':<6} {'t':<8} {'ARI':<8} {'NMI':<8} {'轮廓系数':<10} {'邻域保持':<10}")
+            print("-" * 85)
             for i, 结果 in enumerate(排序结果[:5]):
                 ari_str = f"{结果['ARI']:.4f}" if 结果['ARI'] is not None else "N/A"
                 nmi_str = f"{结果['NMI']:.4f}" if 结果['NMI'] is not None else "N/A"
                 轮廓_str = f"{结果['轮廓系数']:.4f}" if 结果['轮廓系数'] is not None else "N/A"
-                print(f"{i+1:<4} {结果['n_components']:<6} {结果['knn']:<4} {结果['decay']:<6} {str(结果['t']):<8} {ari_str:<8} {nmi_str:<8} {轮廓_str:<10}")
+                邻域_str = f"{结果['邻域保持度']:.4f}"
+                print(f"{i+1:<4} {结果['n_components']:<6} {结果['knn']:<4} {结果['decay']:<6} {str(结果['t']):<8} {ari_str:<8} {nmi_str:<8} {轮廓_str:<10} {邻域_str:<10}")
         
         print("="*80)
     
@@ -377,6 +439,9 @@ class ATACseq无预处理优化:
             'ARI': 最佳['ARI'],
             'NMI': 最佳['NMI'],
             '轮廓系数': 最佳['轮廓系数'],
+            '邻域保持度': 最佳['邻域保持度'],
+            '邻域保持度_00': 最佳['邻域保持度_00'],
+            '邻域保持度_01': 最佳['邻域保持度_01'],
             '聚类数量': 最佳['聚类数量'],
             '耗时_秒': 最佳['耗时']
         }])
@@ -415,8 +480,7 @@ class ATACseq无预处理优化:
         print(f"最佳维度: {最佳结果['n_components']}")
         if 最佳结果['ARI'] is not None:
             print(f"最佳ARI: {最佳结果['ARI']:.4f}")
-        if 最佳结果['NMI'] is not None:
-            print(f"最佳NMI: {最佳结果['NMI']:.4f}")
+        print(f"最佳邻域保持度: {最佳结果['邻域保持度']:.4f}")
 
 # 执行优化
 if __name__ == "__main__":
